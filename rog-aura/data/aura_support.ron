@@ -1106,7 +1106,16 @@
         advanced_type: r#None,
         power_zones: [Keyboard],
     ),
-    (
+        (
+        device_name: "GX651AR",
+        product_id: "1ce6",
+        layout_name: "g634j-per-key",
+        basic_modes: [Static, Breathe, RainbowCycle, RainbowWave, Star, Rain, Highlight, Laser, Ripple, Pulse, Comet, Flash],
+        basic_zones: [],
+        advanced_type: PerKey,
+        power_zones: [Keyboard, Lightbar],
+    ),
+(
         device_name: "GX502",
         product_id: "",
         layout_name: "gx502",

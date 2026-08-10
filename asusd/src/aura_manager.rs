@@ -259,17 +259,46 @@ impl DeviceManager {
             .scan_devices()
             .map_err(|e| PlatformError::IoPath("enumerator".to_owned(), e))?
         {
-            // Only deduplicate ASUS devices; non-ASUS multi-interface devices are unaffected.
+            // ASUS Zephyrus Duo keyboard 0b05:1ce6 is a composite HID device.
+            //
+            // Interface 0 is the normal keyboard HID, while the Aura/vendor
+            // control interface is interface 3 (hidraw3 on the current GX651AR).
+            //
+            // Do not let interface 0 win merely because udev enumerates it first.
+            // For 1ce6, only process the vendor-specific interface (1.3).
             if let Ok(Some(usb_parent)) = device.parent_with_subsystem_devtype("usb", "usb_device")
             {
-                if usb_parent.attribute_value("idVendor") == Some(std::ffi::OsStr::new("0b05")) {
-                    let syspath = usb_parent.syspath().to_string_lossy().to_string();
+                let vendor = usb_parent.attribute_value("idVendor");
+                let product = usb_parent.attribute_value("idProduct");
+
+                if vendor == Some(std::ffi::OsStr::new("0b05"))
+                    && product == Some(std::ffi::OsStr::new("1ce6"))
+                {
+                    let syspath = device.syspath().to_string_lossy().to_string();
+
+                    if !syspath.contains(":1.2/") {
+                        debug!("Skipping non-Aura 1ce6 HID interface: {}", syspath);
+                        continue;
+                    }
+
+                    debug!(
+                        "Selected ASUS 0b05:1ce6 Aura HID interface 1.2: {}",
+                        syspath
+                    );
+
                     if !seen_usb_parents.insert(syspath) {
-                        debug!("Skipping duplicate hidraw for USB parent already processed");
+                        continue;
+                    }
+                } else if vendor == Some(std::ffi::OsStr::new("0b05")) {
+                    let parent_path = usb_parent.syspath().to_string_lossy().to_string();
+
+                    if !seen_usb_parents.insert(parent_path) {
+                        debug!("Skipping duplicate ASUS hidraw for USB parent already processed");
                         continue;
                     }
                 }
             }
+
             devices.append(&mut Self::init_hid_devices(connection, device, handles.clone()).await?);
         }
 
