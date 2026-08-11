@@ -100,6 +100,37 @@ pub struct DeviceManager {
     _hid_handles: Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
 }
 
+/// Returns true if this hidraw device is a non-Aura interface on the
+/// ASUS Zephyrus Duo (0b05:1ce6) composite device and should be skipped.
+///
+/// 0b05:1ce6 exposes multiple HID interfaces; only interface 1.2 is the
+/// real Aura/vendor control interface (report ID 0x5d, Output/Feature
+/// capable). Other interfaces reuse that report ID for unrelated
+/// Input-only data. Used by both startup enumeration and hotplug
+/// add-event handling so the wrong interface can never be selected,
+/// including after USB reset/resume.
+fn is_non_aura_1ce6_interface(device: &Device) -> bool {
+    if let Ok(Some(usb_parent)) = device.parent_with_subsystem_devtype("usb", "usb_device") {
+        let vendor = usb_parent.attribute_value("idVendor");
+        let product = usb_parent.attribute_value("idProduct");
+
+        if vendor == Some(std::ffi::OsStr::new("0b05"))
+            && product == Some(std::ffi::OsStr::new("1ce6"))
+        {
+            let syspath = device.syspath().to_string_lossy().to_string();
+            if !syspath.contains(":1.2/") {
+                debug!("Skipping non-Aura 1ce6 HID interface: {}", syspath);
+                return true;
+            }
+            debug!(
+                "Selected ASUS 0b05:1ce6 Aura HID interface 1.2: {}",
+                syspath
+            );
+        }
+    }
+    false
+}
+
 impl DeviceManager {
     #[allow(clippy::type_complexity)]
     async fn get_or_create_hid_handle(
@@ -259,44 +290,18 @@ impl DeviceManager {
             .scan_devices()
             .map_err(|e| PlatformError::IoPath("enumerator".to_owned(), e))?
         {
-            // ASUS Zephyrus Duo keyboard 0b05:1ce6 is a composite HID device.
-            //
-            // Interface 0 is the normal keyboard HID, while the Aura/vendor
-            // control interface is interface 1.2 (hidraw3 was the current node
-            // at time of writing, but hidraw numbering is not stable).
-            //
-            // Do not let interface 0 win merely because udev enumerates it first.
-            // For 1ce6, only process the vendor-specific interface (1.2).
+            // ASUS Zephyrus Duo keyboard 0b05:1ce6 is a composite HID device;
+            // see is_non_aura_1ce6_interface for why interface 1.2 is required.
+            if is_non_aura_1ce6_interface(&device) {
+                continue;
+            }
+
             if let Ok(Some(usb_parent)) = device.parent_with_subsystem_devtype("usb", "usb_device")
             {
-                let vendor = usb_parent.attribute_value("idVendor");
-                let product = usb_parent.attribute_value("idProduct");
-
-                if vendor == Some(std::ffi::OsStr::new("0b05"))
-                    && product == Some(std::ffi::OsStr::new("1ce6"))
-                {
-                    let syspath = device.syspath().to_string_lossy().to_string();
-
-                    if !syspath.contains(":1.2/") {
-                        debug!("Skipping non-Aura 1ce6 HID interface: {}", syspath);
-                        continue;
-                    }
-
-                    debug!(
-                        "Selected ASUS 0b05:1ce6 Aura HID interface 1.2: {}",
-                        syspath
-                    );
-
-                    if !seen_usb_parents.insert(syspath) {
-                        continue;
-                    }
-                } else if vendor == Some(std::ffi::OsStr::new("0b05")) {
-                    let parent_path = usb_parent.syspath().to_string_lossy().to_string();
-
-                    if !seen_usb_parents.insert(parent_path) {
-                        debug!("Skipping duplicate ASUS hidraw for USB parent already processed");
-                        continue;
-                    }
+                let parent_path = usb_parent.syspath().to_string_lossy().to_string();
+                if !seen_usb_parents.insert(parent_path) {
+                    debug!("Skipping duplicate ASUS hidraw for USB parent already processed");
+                    continue;
                 }
             }
 
@@ -687,6 +692,9 @@ impl DeviceManager {
                                         }
                                     }
                                     let evdev = event.device();
+                                    if is_non_aura_1ce6_interface(&evdev) {
+                                        return Ok(());
+                                    }
                                     if let Ok(mut new_devs) = Self::init_hid_devices(
                                         &conn_copy,
                                         evdev,
