@@ -179,7 +179,9 @@ impl AuraZbus {
         if config.brightness == LedBrightness::Off {
             config.brightness = LedBrightness::Med;
         }
-        self.0.set_brightness(config.brightness.into()).await?;
+        if let Err(e) = self.0.set_brightness(config.brightness.into()).await {
+            log::warn!("Could not set keyboard backlight brightness: {e}");
+        }
         config.set_builtin(effect);
         config.write();
         Ok(())
