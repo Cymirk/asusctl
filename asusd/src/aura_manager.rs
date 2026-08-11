@@ -262,10 +262,11 @@ impl DeviceManager {
             // ASUS Zephyrus Duo keyboard 0b05:1ce6 is a composite HID device.
             //
             // Interface 0 is the normal keyboard HID, while the Aura/vendor
-            // control interface is interface 3 (hidraw3 on the current GX651AR).
+            // control interface is interface 1.2 (hidraw3 was the current node
+            // at time of writing, but hidraw numbering is not stable).
             //
             // Do not let interface 0 win merely because udev enumerates it first.
-            // For 1ce6, only process the vendor-specific interface (1.3).
+            // For 1ce6, only process the vendor-specific interface (1.2).
             if let Ok(Some(usb_parent)) = device.parent_with_subsystem_devtype("usb", "usb_device")
             {
                 let vendor = usb_parent.attribute_value("idVendor");
