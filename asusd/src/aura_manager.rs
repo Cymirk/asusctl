@@ -5,6 +5,9 @@
 // - If udev sees device removed then remove the zbus path
 
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dmi_id::DMIID;
@@ -131,6 +134,93 @@ fn is_non_aura_1ce6_interface(device: &Device) -> bool {
     false
 }
 
+/// Returns true if this hidraw device on the ASUS Zephyrus Duo (0b05:1ce6)
+/// is the same interface 1.2 node used for Aura LED control. The button
+/// listener reads from this same node (report ID 0x5a) rather than a
+/// separate interface, since 3-6:1.2 carries both the LED-control output
+/// report (0x5d) and the AURA-key input report (0x5a).
+fn is_1ce6_aura_interface(device: &Device) -> bool {
+    if let Ok(Some(usb_parent)) = device.parent_with_subsystem_devtype("usb", "usb_device") {
+        let vendor = usb_parent.attribute_value("idVendor");
+        let product = usb_parent.attribute_value("idProduct");
+        if vendor == Some(std::ffi::OsStr::new("0b05"))
+            && product == Some(std::ffi::OsStr::new("1ce6"))
+        {
+            let syspath = device.syspath().to_string_lossy().to_string();
+            return syspath.contains(":1.2/");
+        }
+    }
+    false
+}
+
+/// Spawn a dedicated blocking-read thread on the AURA button's hidraw node.
+/// On each press (report `[0x5a, 0xb3, ...]`) this cycles to the next
+/// supported Aura mode via the same in-process AuraZbus handle the dbus
+/// interface uses, so hardware writes and config persistence stay identical
+/// to `asusctl led-mode --next-mode`.
+fn spawn_aura_button_listener(aura_zbus: AuraZbus) {
+    std::thread::spawn(move || {
+        let dev_node = (|| -> Option<PathBuf> {
+            let mut enumerator = udev::Enumerator::new().ok()?;
+            enumerator.match_subsystem("hidraw").ok()?;
+            for device in enumerator.scan_devices().ok()? {
+                if is_1ce6_aura_interface(&device) {
+                    return device.devnode().map(|p| p.to_owned());
+                }
+            }
+            None
+        })();
+
+        let Some(dev_node) = dev_node else {
+            warn!("AURA button listener: could not find 0b05:1ce6 interface 1.2 hidraw node");
+            return;
+        };
+
+        let mut file = match OpenOptions::new().read(true).open(&dev_node) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("AURA button listener: failed to open {dev_node:?}: {e}");
+                return;
+            }
+        };
+
+        info!("AURA button listener: reading {dev_node:?}");
+
+        let rt = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
+        let mut buf = [0u8; 64];
+        loop {
+            match file.read(&mut buf) {
+                Ok(n) if n >= 2 && buf[0] == 0x5a => {
+                    if buf[1] == 0xb3 {
+                        let aura_zbus = aura_zbus.clone();
+                        rt.block_on(async move {
+                            if let Err(e) = cycle_aura_mode(&aura_zbus).await {
+                                warn!("AURA button: failed to cycle mode: {e:?}");
+                            }
+                        });
+                    }
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    warn!("AURA button listener: read error, stopping: {e}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Advance to the next supported Aura mode, wrapping around. Delegates to
+/// AuraZbus::cycle_led_mode (trait_impls.rs), which lives in the same module
+/// as the private fields/methods it needs.
+async fn cycle_aura_mode(aura_zbus: &AuraZbus) -> Result<(), RogError> {
+    aura_zbus
+        .clone()
+        .cycle_led_mode()
+        .await
+        .map_err(|e| RogError::MissingFunction(format!("cycle_led_mode failed: {e}")))
+}
+
 impl DeviceManager {
     #[allow(clippy::type_complexity)]
     async fn get_or_create_hid_handle(
@@ -240,6 +330,7 @@ impl DeviceManager {
                                     dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_tuf());
                                 let ctrl = AuraZbus::new(aura);
                                 if ctrl
+                                    .clone()
                                     .start_tasks(connection, path.clone())
                                     .await
                                     .map_err(|e| {
@@ -247,6 +338,7 @@ impl DeviceManager {
                                     })
                                     .is_ok()
                                 {
+                                    spawn_aura_button_listener(ctrl.clone());
                                     devices.push(AsusDevice {
                                         device: dev_type,
                                         dbus_path: path,

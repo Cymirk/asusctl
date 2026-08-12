@@ -45,6 +45,28 @@ impl AuraZbus {
         // task.create_tasks(signal_ctx).await
         Ok(())
     }
+
+    /// Advance to the next supported Aura mode, wrapping around. Used by the
+    /// AURA hardware button listener in aura_manager.rs. Lives here (same
+    /// module as the private `config` field and `set_led_mode`) so it can
+    /// call both without changing their visibility.
+    pub(crate) async fn cycle_led_mode(&mut self) -> Result<(), ZbErr> {
+        let (current, modes) = {
+            let config = self.0.config.lock().await;
+            (config.current_mode, config.support_data.basic_modes.clone())
+        };
+
+        if modes.is_empty() {
+            return Ok(());
+        }
+
+        let next = match modes.iter().position(|m| *m == current) {
+            Some(pos) => modes[(pos + 1) % modes.len()],
+            None => modes[0],
+        };
+
+        self.set_led_mode(next).await
+    }
 }
 
 /// The main interface for changing, reading, or notfying
