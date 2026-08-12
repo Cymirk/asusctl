@@ -158,24 +158,8 @@ fn is_1ce6_aura_interface(device: &Device) -> bool {
 /// supported Aura mode via the same in-process AuraZbus handle the dbus
 /// interface uses, so hardware writes and config persistence stay identical
 /// to `asusctl led-mode --next-mode`.
-fn spawn_aura_button_listener(aura_zbus: AuraZbus) {
+fn spawn_aura_button_listener(aura_zbus: AuraZbus, dev_node: PathBuf) {
     std::thread::spawn(move || {
-        let dev_node = (|| -> Option<PathBuf> {
-            let mut enumerator = udev::Enumerator::new().ok()?;
-            enumerator.match_subsystem("hidraw").ok()?;
-            for device in enumerator.scan_devices().ok()? {
-                if is_1ce6_aura_interface(&device) {
-                    return device.devnode().map(|p| p.to_owned());
-                }
-            }
-            None
-        })();
-
-        let Some(dev_node) = dev_node else {
-            warn!("AURA button listener: could not find 0b05:1ce6 interface 1.2 hidraw node");
-            return;
-        };
-
         let mut file = match OpenOptions::new().read(true).open(&dev_node) {
             Ok(f) => f,
             Err(e) => {
@@ -338,7 +322,11 @@ impl DeviceManager {
                                     })
                                     .is_ok()
                                 {
-                                    spawn_aura_button_listener(ctrl.clone());
+                                    if is_1ce6_aura_interface(&device) {
+                                        if let Some(dev_node) = device.devnode() {
+                                            spawn_aura_button_listener(ctrl.clone(), dev_node.to_owned());
+                                        }
+                                    }
                                     devices.push(AsusDevice {
                                         device: dev_type,
                                         dbus_path: path,
